@@ -14,7 +14,7 @@ import (
 	"github.com/go-chassis/go-chassis/pkg/util/tags"
 )
 
-var VaildServiceDiscovery registry.ServiceDiscovery
+var ValidServiceDiscovery registry.ServiceDiscovery
 var AllServices []*registry.MicroService
 
 func TestNewDiscoveryService(t *testing.T) {
@@ -29,13 +29,13 @@ func TestNewDiscoveryService(t *testing.T) {
 	os.Setenv("INSTANCE_IP", LocalIPAddress)
 
 	// No panic should happen
-	VaildServiceDiscovery = NewDiscoveryService(options)
+	ValidServiceDiscovery = NewDiscoveryService(options)
 
 }
 
 // func TestAutoSync(t *testing.T) {
 //     archaius.Init()
-//     VaildServiceDiscovery.AutoSync()
+//     ValidServiceDiscovery.AutoSync()
 // }
 
 func TestEmptyPilotAddrs(t *testing.T) {
@@ -53,7 +53,7 @@ func TestEmptyPilotAddrs(t *testing.T) {
 }
 
 func TestGetAllMicroServices(t *testing.T) {
-	services, err := VaildServiceDiscovery.GetAllMicroServices()
+	services, err := ValidServiceDiscovery.GetAllMicroServices()
 	if err != nil {
 		t.Errorf("Failed to get all micro services: %s", err.Error())
 	}
@@ -66,7 +66,7 @@ func TestGetAllMicroServices(t *testing.T) {
 
 func TestGetMicroServiceID(t *testing.T) {
 	serviceName := "pilotv2server"
-	msID, err := VaildServiceDiscovery.GetMicroServiceID("default", serviceName, "v3", "")
+	msID, err := ValidServiceDiscovery.GetMicroServiceID("default", serviceName, "v3", "")
 	if err != nil {
 		t.Errorf("Failed to get micro service id: %s", err.Error())
 	}
@@ -78,7 +78,7 @@ func TestGetMicroServiceID(t *testing.T) {
 
 func TestGetMicroService(t *testing.T) {
 	serviceName := "istio-pilot"
-	svc, err := VaildServiceDiscovery.GetMicroService(serviceName)
+	svc, err := ValidServiceDiscovery.GetMicroService(serviceName)
 	if err != nil {
 		t.Errorf("Failed to get micro service: %s", err.Error())
 	}
@@ -90,7 +90,7 @@ func TestGetMicroService(t *testing.T) {
 func TestGetMicroServiceInstance(t *testing.T) {
 	// serviceName := "istio-pilot"
 	serviceName := "hello"
-	instances, err := VaildServiceDiscovery.GetMicroServiceInstances("pilotv2client", serviceName)
+	instances, err := ValidServiceDiscovery.GetMicroServiceInstances("pilotv2client", serviceName)
 	if err != nil {
 		t.Errorf("Failed to get micro service instances of istio-pilot: %s", err.Error())
 	}
@@ -100,14 +100,13 @@ func TestGetMicroServiceInstance(t *testing.T) {
 }
 
 func TestFindMicroServiceInstances(t *testing.T) {
-	discovery, ok := VaildServiceDiscovery.(*ServiceDiscovery)
+	discovery, ok := ValidServiceDiscovery.(*ServiceDiscovery)
 	if !ok {
 		t.Errorf("Failed to convert discovery into type istiov2.ServiceDiscovery")
 		return
 	}
-	client := discovery.client
 
-	clusters, err := client.CDS()
+	clusters, err := discovery.XdsClient.CDS()
 	if err != nil {
 		t.Errorf("Failed to teset FindMicroServiceInstances, CDS failed: %s", err.Error())
 	}
@@ -125,7 +124,7 @@ func TestFindMicroServiceInstances(t *testing.T) {
 			KV:    map[string]string{},
 			Label: "",
 		}
-		instances, err := VaildServiceDiscovery.FindMicroServiceInstances("pilotv2client", clusterWithSubset.ServiceName, emptyTags)
+		instances, err := ValidServiceDiscovery.FindMicroServiceInstances("pilotv2client", clusterWithSubset.ServiceName, emptyTags)
 		if err != nil {
 			t.Errorf("Failed to FindMicroServiceInstances of %s: %s", clusterWithSubset.ServiceName, err.Error())
 		}
@@ -143,12 +142,46 @@ func TestFindMicroServiceInstances(t *testing.T) {
 			},
 			Label: "version=v1",
 		}
-		_, err := VaildServiceDiscovery.FindMicroServiceInstances("pilotv2client", targetCluster.Name, tags)
+		_, err := ValidServiceDiscovery.FindMicroServiceInstances("pilotv2client", targetCluster.Name, tags)
 		if err == nil {
 			t.Errorf("Should caught error to get the endpoints of cluster without tags")
 		}
 	}
 
+}
+
+func TestGetSubsetTags(t *testing.T) {
+	discovery, ok := ValidServiceDiscovery.(*ServiceDiscovery)
+	if !ok {
+		t.Errorf("Failed to convert discovery into type istiov2.ServiceDiscovery")
+		return
+	}
+
+	clusters, err := discovery.XdsClient.CDS()
+	if err != nil {
+		t.Errorf("Failed to get clusters by CDS: %s", err.Error())
+	}
+
+	t.Logf("Got %d clusters\n", len(clusters))
+
+	var targetClusterInfo *istioinfra.XdsClusterInfo = nil
+	for _, c := range clusters {
+		if info := istioinfra.ParseClusterName(c.Name); info != nil && info.Subset != "" {
+			targetClusterInfo = info
+			break
+		}
+	}
+
+	if targetClusterInfo == nil {
+		t.Log("No tagged services in test environment, skip")
+	} else {
+		tags, err := discovery.GetSubsetTags(targetClusterInfo.Namespace, targetClusterInfo.ServiceName, targetClusterInfo.Subset)
+		if err != nil {
+			t.Errorf("Failed to get subset tags: %s", err.Error())
+		} else if len(tags) == 0 {
+			t.Logf("Should not return empty tags %s", targetClusterInfo.ClusterName)
+		}
+	}
 }
 
 func TestToMicroService(t *testing.T) {
@@ -200,7 +233,7 @@ func TestToMicroServiceInstance(t *testing.T) {
 }
 
 func TestClose(t *testing.T) {
-	if err := VaildServiceDiscovery.Close(); err != nil {
+	if err := ValidServiceDiscovery.Close(); err != nil {
 		t.Error(err)
 	}
 }

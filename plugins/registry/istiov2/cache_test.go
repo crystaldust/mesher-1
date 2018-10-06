@@ -24,9 +24,11 @@ var (
 	LocalIPAddress string
 	nodeInfo       *istioinfra.NodeInfo
 
-	testXdsClient    *istioinfra.XdsClient
-	testCacheManager *CacheManager
-	err              error
+	// testXdsClient    *istioinfra.XdsClient
+	// testK8SClient    *rest.Client
+	testServiceDiscovery registry.ServiceDiscovery
+	testCacheManager     *CacheManager
+	err                  error
 )
 
 func TestMain(t *testing.T) {
@@ -63,14 +65,23 @@ func TestMain(t *testing.T) {
 		InstanceIP: LocalIPAddress,
 	}
 
-	testXdsClient, err = istioinfra.NewXdsClient(ValidPilotAddr, nil, nodeInfo, KubeConfig)
-	if err != nil {
-		panic("Failed to prepare test, xds client creation failed: " + err.Error())
+	options := registry.Options{
+		Addrs:      []string{ValidPilotAddr},
+		ConfigPath: KubeConfig,
 	}
+
+	testServiceDiscovery = NewDiscoveryService(options)
+
 }
 
 func TestNewCacheManager(t *testing.T) {
-	testCacheManager, err = NewCacheManager(testXdsClient)
+
+	discovery, ok := testServiceDiscovery.(*ServiceDiscovery)
+	if !ok {
+		t.Errorf("Failed to convert discovery into type istiov2.ServiceDiscovery")
+		return
+	}
+	testCacheManager, err = NewCacheManager(discovery)
 	if err != nil {
 		t.Errorf("Failed to create CacheManager: %s", err.Error())
 	}

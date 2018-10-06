@@ -67,7 +67,7 @@ func TestMain(t *testing.T) {
 }
 
 func TestNewXdsClient(t *testing.T) {
-	client, err := NewXdsClient(ValidPilotAddr, nil, nodeInfo, KubeConfig)
+	client, err := NewXdsClient(ValidPilotAddr, nil, nodeInfo)
 
 	if err != nil {
 		t.Errorf("Failed to create xds client: %s", err.Error())
@@ -183,27 +183,6 @@ func TestVersionInfo(t *testing.T) {
 	rdsVersionInfo := ValidXdsClient.getVersionInfo(TypeRds)
 	if rdsVersionInfo != nowStr {
 		t.Errorf("Failed to test VersionInfo: %s should be equal to %s", rdsVersionInfo, nowStr)
-	}
-}
-
-func TestGetSubsetTags(t *testing.T) {
-	var targetClusterInfo *XdsClusterInfo = nil
-	for _, c := range TestClusters {
-		if info := ParseClusterName(c.Name); info != nil && info.Subset != "" {
-			targetClusterInfo = info
-			break
-		}
-	}
-
-	if targetClusterInfo == nil {
-		t.Log("No tagged services in test environment, skip")
-	} else {
-		tags, err := ValidXdsClient.GetSubsetTags(targetClusterInfo.Namespace, targetClusterInfo.ServiceName, targetClusterInfo.Subset)
-		if err != nil {
-			t.Errorf("Failed to get subset tags: %s", err.Error())
-		} else if len(tags) == 0 {
-			t.Logf("Should not return empty tags %s", targetClusterInfo.ClusterName)
-		}
 	}
 }
 

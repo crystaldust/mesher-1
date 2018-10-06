@@ -3,22 +3,18 @@ package pilotv2
 import (
 	"context"
 	"crypto/tls"
-	"encoding/json"
 	"fmt"
 	"strings"
 
 	apiv2 "github.com/envoyproxy/go-control-plane/envoy/api/v2"
 	apiv2core "github.com/envoyproxy/go-control-plane/envoy/api/v2/core"
-	apiv2endpoint "github.com/envoyproxy/go-control-plane/envoy/api/v2/endpoint"
 	apiv2route "github.com/envoyproxy/go-control-plane/envoy/api/v2/route"
-	k8sinfra "github.com/go-mesh/mesher/pkg/infras/k8s"
 
 	"github.com/envoyproxy/go-control-plane/envoy/service/discovery/v2"
 	"github.com/go-mesh/openlogging"
 	"github.com/gogo/protobuf/proto"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials"
-	"k8s.io/client-go/rest"
 )
 
 //XdsClient provides the XDS API calls.
@@ -29,7 +25,6 @@ type XdsClient struct {
 	nodeInfo    *NodeInfo
 	NodeID      string
 	NodeCluster string
-	k8sClient   *rest.RESTClient
 }
 
 //XdsType is the wrapper of string, the wrapper type should be "cds", "eds", "lds" or "rds"
@@ -72,7 +67,7 @@ type XdsClusterInfo struct {
 }
 
 //NewXdsClient returns the new XDS client.
-func NewXdsClient(pilotAddr string, tlsConfig *tls.Config, nodeInfo *NodeInfo, kubeconfigPath string) (*XdsClient, error) {
+func NewXdsClient(pilotAddr string, tlsConfig *tls.Config, nodeInfo *NodeInfo) (*XdsClient, error) {
 	// TODO Handle the array
 	xdsClient := &XdsClient{
 		PilotAddr: pilotAddr,
@@ -88,49 +83,7 @@ func NewXdsClient(pilotAddr string, tlsConfig *tls.Config, nodeInfo *NodeInfo, k
 		TypeRds: {},
 	}
 
-	if k8sClient, err := k8sinfra.CreateK8SRestClient(kubeconfigPath, "apis", "networking.istio.io", "v1alpha3"); err != nil {
-		return nil, err
-	} else {
-		xdsClient.k8sClient = k8sClient
-	}
-
 	return xdsClient, nil
-}
-
-//GetSubsetTags returns the tags of the specified subset.
-func (client *XdsClient) GetSubsetTags(namespace, hostName, subsetName string) (map[string]string, error) {
-	req := client.k8sClient.Get()
-	req.Resource("destinationrules")
-	req.Namespace(namespace)
-
-	result := req.Do()
-	rawBody, err := result.Raw()
-	if err != nil {
-		return nil, err
-	}
-
-	var drResult k8sinfra.DestinationRuleResult
-	if err := json.Unmarshal(rawBody, &drResult); err != nil {
-		return nil, err
-	}
-
-	// Find the subset
-	tags := map[string]string{}
-	for _, dr := range drResult.Items {
-		if dr.Spec.Host == hostName {
-			for _, subset := range dr.Spec.Subsets {
-				if subset.Name == subsetName {
-					for k, v := range subset.Labels {
-						tags[k] = v
-					}
-					break
-				}
-			}
-			break
-		}
-	}
-
-	return tags, nil
 }
 
 func (client *XdsClient) getGrpcConn() (*grpc.ClientConn, error) {
@@ -283,50 +236,6 @@ func (client *XdsClient) EDS(clusterName string) (*apiv2.ClusterLoadAssignment, 
 		}
 	}
 	return &loadAssignment, e
-}
-
-//GetEndpointsByTags fetches the cluster's endpoints with tags. The tags is usually specified in a DestinationRule.
-func (client *XdsClient) GetEndpointsByTags(serviceName string, tags map[string]string) ([]apiv2endpoint.LbEndpoint, string, error) {
-	clusters, err := client.CDS()
-	if err != nil {
-		return nil, "", err
-	}
-
-	lbendpoints := []apiv2endpoint.LbEndpoint{}
-	clusterName := ""
-	for _, cluster := range clusters {
-		clusterInfo := ParseClusterName(cluster.Name)
-		if clusterInfo == nil || clusterInfo.Subset == "" || clusterInfo.ServiceName != serviceName {
-			continue
-		}
-		// So clusterInfo is not nil and subset is not empty
-		if subsetTags, err := client.GetSubsetTags(clusterInfo.Namespace, clusterInfo.ServiceName, clusterInfo.Subset); err == nil {
-			// filter with tags
-			matched := true
-			for k, v := range tags {
-				if subsetTagValue, exists := subsetTags[k]; exists == false || subsetTagValue != v {
-					matched = false
-					break
-				}
-			}
-
-			if matched { // We got the cluster!
-				clusterName = cluster.Name
-				loadAssignment, err := client.EDS(cluster.Name)
-				if err != nil {
-					return nil, clusterName, err
-				}
-
-				for _, item := range loadAssignment.Endpoints {
-					lbendpoints = append(lbendpoints, item.LbEndpoints...)
-				}
-
-				return lbendpoints, clusterName, nil
-			}
-		}
-	}
-
-	return lbendpoints, clusterName, nil
 }
 
 //RDS is the Router Discovery Service API, it returns the virtual hosts which contains Routes

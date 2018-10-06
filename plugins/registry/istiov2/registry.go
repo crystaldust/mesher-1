@@ -1,6 +1,7 @@
 package istiov2
 
 import (
+	"encoding/json"
 	"fmt"
 	"log"
 	"os"
@@ -10,6 +11,8 @@ import (
 	apiv2 "github.com/envoyproxy/go-control-plane/envoy/api/v2"
 	apiv2endpoint "github.com/envoyproxy/go-control-plane/envoy/api/v2/endpoint"
 	istioinfra "github.com/go-mesh/mesher/pkg/infras/istio"
+	k8sinfra "github.com/go-mesh/mesher/pkg/infras/k8s"
+	"k8s.io/client-go/rest"
 
 	"github.com/go-chassis/go-chassis/core/common"
 	"github.com/go-chassis/go-chassis/core/metadata"
@@ -34,9 +37,10 @@ const (
 
 //ServiceDiscovery is the discovery service for istio pilot with xDS v2 API
 type ServiceDiscovery struct {
-	Name    string
-	client  *istioinfra.XdsClient
-	options registry.Options
+	Name      string
+	XdsClient *istioinfra.XdsClient
+	k8sClient *rest.RESTClient
+	options   registry.Options
 }
 
 //GetMicroServiceID returns the id of the micro service
@@ -46,7 +50,7 @@ func (discovery *ServiceDiscovery) GetMicroServiceID(appID, microServiceName, ve
 
 //GetAllMicroServices returns all the micro services, which is mapped from xDS clusters
 func (discovery *ServiceDiscovery) GetAllMicroServices() ([]*registry.MicroService, error) {
-	clusters, err := discovery.client.CDS()
+	clusters, err := discovery.XdsClient.CDS()
 	if err != nil {
 		return nil, err
 	}
@@ -96,7 +100,7 @@ func toMicroServiceInstance(clusterName string, lbendpoint *apiv2endpoint.LbEndp
 func (discovery *ServiceDiscovery) GetMicroService(microServiceID string) (*registry.MicroService, error) {
 	// If the service is in the clusters, return it, or nil
 
-	clusters, err := discovery.client.CDS()
+	clusters, err := discovery.XdsClient.CDS()
 	if err != nil {
 		return nil, err
 	}
@@ -132,7 +136,7 @@ func (discovery *ServiceDiscovery) GetMicroServiceInstances(consumerID, provider
 		return nil, err
 	}
 
-	loadAssignment, err := discovery.client.EDS(service.ServiceName)
+	loadAssignment, err := discovery.XdsClient.EDS(service.ServiceName)
 	if err != nil {
 		return nil, err
 	}
@@ -159,7 +163,7 @@ func (discovery *ServiceDiscovery) FindMicroServiceInstances(consumerID, microSe
 	if len(instances) == 0 {
 		var lbendpoints []apiv2endpoint.LbEndpoint
 		var err error
-		lbendpoints, clusterName, err := discovery.client.GetEndpointsByTags(microServiceName, tags.KV)
+		lbendpoints, clusterName, err := discovery.GetEndpointsByTags(microServiceName, tags.KV)
 		if err != nil {
 			return nil, err
 		}
@@ -179,7 +183,7 @@ var cacheManager *CacheManager
 //AutoSync updates the services' info periodically in the background
 func (discovery *ServiceDiscovery) AutoSync() {
 	var err error
-	cacheManager, err = NewCacheManager(discovery.client)
+	cacheManager, err = NewCacheManager(discovery)
 	if err != nil {
 		openlogging.GetLogger().Errorf("Failed to create cache manager, indexing will not work: %s", err.Error())
 	} else {
@@ -203,18 +207,104 @@ func NewDiscoveryService(options registry.Options) registry.ServiceDiscovery {
 		Namespace:  PodNamespace,
 		InstanceIP: InstanceIP,
 	}
-	xdsClient, err := istioinfra.NewXdsClient(pilotAddr, options.TLSConfig, nodeInfo, options.ConfigPath)
+	xdsClient, err := istioinfra.NewXdsClient(pilotAddr, options.TLSConfig, nodeInfo)
 	if err != nil {
 		panic("Failed to create XDS client: " + err.Error())
 	}
 
+	k8sClient, err := k8sinfra.CreateK8SRestClient(options.ConfigPath, "apis", "networking.istio.io", "v1alpha3")
+	if err != nil {
+		panic("Failed to create k8s client: " + err.Error())
+	}
+
 	discovery := &ServiceDiscovery{
-		client:  xdsClient,
-		Name:    PilotV2Registry,
-		options: options,
+		XdsClient: xdsClient,
+		k8sClient: k8sClient,
+		Name:      PilotV2Registry,
+		options:   options,
 	}
 
 	return discovery
+}
+
+//GetSubsetTags returns the tags of the specified subset.
+func (discovery *ServiceDiscovery) GetSubsetTags(namespace, hostName, subsetName string) (map[string]string, error) {
+	req := discovery.k8sClient.Get()
+	req.Resource("destinationrules")
+	req.Namespace(namespace)
+
+	result := req.Do()
+	rawBody, err := result.Raw()
+	if err != nil {
+		return nil, err
+	}
+
+	var drResult k8sinfra.DestinationRuleResult
+	if err := json.Unmarshal(rawBody, &drResult); err != nil {
+		return nil, err
+	}
+
+	// Find the subset
+	tags := map[string]string{}
+	for _, dr := range drResult.Items {
+		if dr.Spec.Host == hostName {
+			for _, subset := range dr.Spec.Subsets {
+				if subset.Name == subsetName {
+					for k, v := range subset.Labels {
+						tags[k] = v
+					}
+					break
+				}
+			}
+			break
+		}
+	}
+
+	return tags, nil
+}
+
+//GetEndpointsByTags fetches the cluster's endpoints with tags. The tags is usually specified in a DestinationRule.
+func (discovery *ServiceDiscovery) GetEndpointsByTags(serviceName string, tags map[string]string) ([]apiv2endpoint.LbEndpoint, string, error) {
+	clusters, err := discovery.XdsClient.CDS()
+	if err != nil {
+		return nil, "", err
+	}
+
+	lbendpoints := []apiv2endpoint.LbEndpoint{}
+	clusterName := ""
+	for _, cluster := range clusters {
+		clusterInfo := istioinfra.ParseClusterName(cluster.Name)
+		if clusterInfo == nil || clusterInfo.Subset == "" || clusterInfo.ServiceName != serviceName {
+			continue
+		}
+		// So clusterInfo is not nil and subset is not empty
+		if subsetTags, err := discovery.GetSubsetTags(clusterInfo.Namespace, clusterInfo.ServiceName, clusterInfo.Subset); err == nil {
+			// filter with tags
+			matched := true
+			for k, v := range tags {
+				if subsetTagValue, exists := subsetTags[k]; exists == false || subsetTagValue != v {
+					matched = false
+					break
+				}
+			}
+
+			if matched { // We got the cluster!
+				clusterName = cluster.Name
+				loadAssignment, err := discovery.XdsClient.EDS(cluster.Name)
+				if err != nil {
+					return nil, clusterName, err
+				}
+
+				for _, item := range loadAssignment.Endpoints {
+					lbendpoints = append(lbendpoints, item.LbEndpoints...)
+				}
+
+				return lbendpoints, clusterName, nil
+			}
+		}
+	}
+
+	return lbendpoints, clusterName, nil
 }
 
 func init() {

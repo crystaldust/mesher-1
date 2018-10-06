@@ -30,7 +30,7 @@ func init() {
 
 //CacheManager manages the caches for istio pilot results.
 type CacheManager struct {
-	xdsClient *istioinfra.XdsClient
+	discovery *ServiceDiscovery
 }
 
 //AutoSync fetches and updates the cluster and endpoint info periodically
@@ -140,9 +140,9 @@ func (cm *CacheManager) MakeIPIndex() error {
 }
 
 //NewCacheManager creates the CacheManager instance.
-func NewCacheManager(xdsClient *istioinfra.XdsClient) (*CacheManager, error) {
+func NewCacheManager(discovery *ServiceDiscovery) (*CacheManager, error) {
 	cacheManager := &CacheManager{
-		xdsClient: xdsClient,
+		discovery: discovery,
 	}
 
 	return cacheManager, nil
@@ -151,7 +151,7 @@ func NewCacheManager(xdsClient *istioinfra.XdsClient) (*CacheManager, error) {
 func (cm *CacheManager) getClusterInfos() ([]istioinfra.XdsClusterInfo, error) {
 	clusterInfos := []istioinfra.XdsClusterInfo{}
 
-	clusters, err := cm.xdsClient.CDS()
+	clusters, err := cm.discovery.XdsClient.CDS()
 	if err != nil {
 		return nil, err
 	}
@@ -166,13 +166,13 @@ func (cm *CacheManager) getClusterInfos() ([]istioinfra.XdsClusterInfo, error) {
 
 		// Get Tags
 		if clusterInfo.Subset != "" { // Only clusters with subset contain labels
-			if tags, err := cm.xdsClient.GetSubsetTags(clusterInfo.Namespace, clusterInfo.ServiceName, clusterInfo.Subset); err == nil {
+			if tags, err := cm.discovery.GetSubsetTags(clusterInfo.Namespace, clusterInfo.ServiceName, clusterInfo.Subset); err == nil {
 				clusterInfo.Tags = tags
 			}
 		}
 
 		// Get cluster instances' addresses
-		loadAssignment, err := cm.xdsClient.EDS(cluster.Name)
+		loadAssignment, err := cm.discovery.XdsClient.EDS(cluster.Name)
 		if err != nil {
 			return nil, err
 		}
